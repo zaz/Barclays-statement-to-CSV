@@ -2,57 +2,45 @@
 require 'date'
 require 'pdf-reader'
 
-# XXX Look into using a Fibre instead of a class
-class BarclaysParser
-	include Enumerable
-
-	def initialize(lines, expected_start_date=nil, expected_start_balance=nil)
-		@lines = lines
-		@go = false
-		@data = nil
-	end
-
-	def <<(val)
-		@lines << val
-	end
-
-	def each(&lines)
-		@lines.each do |line|
+def barclays_parse(lines)
+	Enumerator.new do |enum|
+		for line in lines
 			case line
+			when :new_file
+				go = false
+				data = {}
 			when ""
 				# puts  # XXX DEBUG
 			when /^Date  *Description/
-				@go = true
+				go = true
 				# puts line  # XXX DEBUG
 			when /^(\d\d? [A-Z][a-z]{2})?  *(\S.*?)     *([0-9,]+\.\d\d)(     *[0-9,]+\.\d\d)?/
+				enum.yield data unless data.empty?
 				# XXX: Fix dates, they currently default to THIS year
-				date = $1 ? Date.parse($1) : nil
-				description, ref = $2, nil
-				transaction, balance = [ $3, $4 ].map{ |e| e.gsub(",", "").to_f if e }
-				if description =~ /^((Start|End) balance|Balance)$/
-					@go = $2 == "Start"
+				data[:date] = $1 ? Date.parse($1) : nil
+				data[:description], data[:ref] = $2, nil
+				data[:transaction], data[:balance] = [ $3, $4 ].map{ |e| e.gsub(",", "").to_f if e }
+				if data[:description] =~ /^((Start|End) balance|Balance)$/
+					go = $2 == "Start"
 					# Blank sheets have only "Balance", and will result in 2 :ends in a row
-					description = @go ? :start : :end
-					balance = transaction
-					transaction = nil
+					data[:description] = go ? :start : :end
+					data[:balance] = data[:transaction]
+					data[:transaction] = nil
 				end
-				# TODO: Use a hash instead
-				yield @data if @data
-				@data = [ date, transaction, balance, ref, description ]
-				yield @data unless @go
+				enum.yield data unless go
 				# puts "\e[33m#{line}\e[m"  # XXX DEBUG
 			when /( * Ref: )(.*?)(      .*|$)/
-				@data[3] = $2
+				data[3] = $2
 				# puts "#{$1}\e[32m#{$2}\e[m#{$3}"  # XXX DEBUG
-			# END of page
+				# END of page
 			when / {20} *Continued/
-				@go = false
-				yield @data
+				go = false
+				enum.yield data
 				# puts line  # XXX DEBUG
-			# DESCRIPTION  # XXX Exclude lines indented by >20 spaces?
+				# DESCRIPTION  # XXX Exclude lines indented by >20 spaces?
 			when /(^ {0,40})(\S.*?)( {7}|$)/
-				if @go
-					@data[-1][-1] << " " + $2
+				if go
+					data[:description] << " " + $2
 					# puts "#{$1}\e[32m#{$2}\e[m"  # XXX DEBUG
 				else
 					# puts "#{$1}#{$2}"  # XXX DEBUG
@@ -64,30 +52,30 @@ class BarclaysParser
 	end
 end
 
-parser = nil
-ARGV.each do |file|
-	# XXX: Catch PDF::Reader::MalformedPDFError instead
-	next unless file =~ /\.pdf$/
-	# puts "\e[1m##### #{file} #####\e[m"  # XXX DEBUG
-
-	File.open(file, "rb") do |io|
-		reader = PDF::Reader.new(io)
-		lines = reader.pages[0..-2].map{ |page| page.text.split("\n") }.flatten
-		parser = BarclaysParser.new(lines)
-
-		# data << parser.parse(lines)
-		# lines_enumerator = lines.each
-		# data << parser.parse(lines_enumerator).each
-
-		parser.each do |i|
-			date = i[0] ||= " " * 10
-			transaction = i[1] ? "% 10.2f" % i[1] : " " * 10
-			balance = i[2] ? "% 10.2f" % i[2] : " " * 10
-			puts "\e[33m%s\t%s\t%s\t%s\t%s\e[m" % [ date, transaction, balance, i[3], i[4] ]
+def readlines(files)
+	Enumerator.new do |enum|
+		files.each do |file|
+			# puts "\e[1m##### #{file} #####\e[m"  # XXX DEBUG
+			File.open(file, "rb") do |io|
+				begin
+					reader = PDF::Reader.new(io)
+				rescue PDF::Reader::MalformedPDFError
+					next
+				end
+				enum.yield :new_file
+				reader.pages[0..-2].map{ |page| page.text.split("\n") }.flatten.each do |line|
+					enum.yield line
+				end
+			end
 		end
-
 	end
+end
 
+barclays_parse(readlines(ARGV)).each do |i|
+	date = i[:date] ||= " " * 10
+	transaction = i[:transaction] ? "% 10.2f" % i[:transaction] : " " * 10
+	balance = i[:balance] ? "% 10.2f" % i[:balance] : " " * 10
+	puts "\e[33m%s\t%s\t%s\t%s\t%s\e[m" % [ date, transaction, balance, i[:ref], i[:description] ]
 end
 
 # 	transactions = amounts.select.each_with_index{ |a, i| i.odd? }
